@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skill-market/skill_listing/v3",
+  "title": "skill_listing — Skill 交易平台上架事件 (Nostr kind 37001, schema v3)",
+  "description": "卖家发布可售 skill 的事件 v3。核心升级: price 单档 → tiers 多档并存 + 定价模式四维分类(mode×structure×period×entitlement); license 细化绑定; verification 强制标准项; 扫描徽章。签名后经 Nostr 中继/直连 P2P 分发。",
+  "type": "object",
+  "required": ["kind", "seller_pubkey", "skill", "price", "terms", "delivery", "created_at"],
+  "properties": {
+    "kind": { "const": 37001 },
+    "seller_pubkey": { "type": "string", "description": "卖家 ed25519/Nostr 公钥（身份即密钥，无平台注册）" },
+    "skill": {
+      "type": "object",
+      "required": ["id", "name", "version", "manifest_hash", "description", "tags", "compat", "verification"],
+      "properties": {
+        "id": { "type": "string", "description": "全局唯一 skill id（作者公钥前缀 + slug）" },
+        "name": { "type": "string", "maxLength": 80 },
+        "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "manifest_hash": { "type": "string", "description": "skill 包 (SKILL.md+scripts+references) 的 sha256，买家验签+对拍用" },
+        "description": { "type": "string", "maxLength": 500 },
+        "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "compat": {
+          "type": "object",
+          "description": "兼容性矩阵：目标 agent 平台 + 最低模型/工具版本",
+          "properties": {
+            "platforms": { "type": "array", "items": { "enum": ["hermes", "claude-code", "codex", "cursor", "openclaw", "gemini-cli", "generic"] } },
+            "model_min": { "type": "string" },
+            "deps": { "type": "array", "items": { "type": "string" }, "description": "依赖的脚本/工具/API" }
+          }
+        },
+        "verification": {
+          "type": "object",
+          "description": "验证回执 v2（fence_epoch 原则：声明必须当下可重放证据链）。标准 checks 为强制项，卖家不得删减",
+          "required": ["receipt_kind", "checks", "last_verified_at"],
+          "properties": {
+            "receipt_kind": { "const": 37004 },
+            "checks": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "enum": ["schema_valid", "health_scan", "pattern_scan", "sample_run", "dependency_check"] },
+              "description": "强制标准验证项: schema_valid 结构校验 / health_scan 健康扫描 / pattern_scan 模式扫描(裸except等) / sample_run 样例跑通 / dependency_check 依赖检查。至少 2 项"
+            },
+            "custom_checks": { "type": "array", "items": { "type": "string" }, "description": "卖家附加验证项(可选)" },
+            "last_verified_at": { "type": "string", "format": "date-time" },
+            "evidence": { "type": "array", "items": { "type": "string" }, "description": "可重放证据链（命令+输出 hash+epoch）" }
+          }
+        },
+        "scan_badge": {
+          "type": "object",
+          "description": "安全扫描徽章（后端收费服务, 见 freemium_backend_revenue.md）",
+          "properties": {
+            "level": { "enum": ["L0_basic", "L1_deep"] },
+            "passed_at": { "type": "string", "format": "date-time" },
+            "report_hash": { "type": "string", "description": "扫描报告 sha256" },
+            "cve_count": { "type": "integer", "minimum": 0 },
+            "provider": { "type": "string", "description": "扫描服务商/平台自扫" }
+          }
+        }
+      }
+    },
+    "price": {
+      "type": "object",
+      "description": "价格 v2: 多档并存。同一 skill 可同时提供买断/订阅/租用/按次，买家按需选档",
+      "required": ["tiers"],
+      "properties": {
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "required": ["mode", "amount", "currency"],
+            "properties": {
+              "mode": {
+                "enum": ["one_time", "subscription", "rental", "pay_per_use", "seat"],
+                "description": "价格类型(v3): one_time 一次性买断 / subscription 订阅(持续升级) / rental 租用(限时) / pay_per_use 按次 / seat 席位(按 agent 数)"
+              },
+              "structure": {
+                "enum": ["flat", "tiered", "volume", "dynamic"],
+                "default": "flat",
+                "description": "价格结构: flat 固定价 / tiered 阶梯(拆多 tier 条目, label 注明版本) / volume 用量价(配合 volume_breakpoints) / dynamic 动态(建议价区间内浮动)"
+              },
+              "amount": { "type": "number", "minimum": 0 },
+              "currency": { "enum": ["usd", "cny", "btc", "sats"] },
+              "period": {
+                "type": "string",
+                "enum": ["monthly", "quarterly", "yearly", "7d", "30d", "per_use"],
+                "description": "订阅/租用周期; subscription/seat 必填 monthly/quarterly/yearly, rental 为 7d/30d, one_time 省略"
+              },
+              "label": { "type": "string", "maxLength": 40, "description": "档位说明, 如'买断当前版本'/'每月升级订阅'/'专业版'" },
+              "updates": {
+                "enum": ["current_version_only", "patch_minor_free", "all_updates"],
+                "description": "更新权益: 买断=当前版本或小版本免费; 订阅=全部更新"
+              },
+              "support": { "enum": ["basic", "priority"], "default": "basic", "description": "技术支持等级: basic 30天SLA/48h响应, priority 24h响应(加价10-20%)" },
+              "seat": {
+                "type": "object",
+                "description": "席位模式专属: 按 agent/用户数计费",
+                "properties": {
+                  "unit": { "enum": ["per_agent", "per_user"] },
+                  "min_seats": { "type": "integer", "minimum": 1 },
+                  "max_seats": { "type": "integer", "minimum": 1 }
+                }
+              },
+              "volume_breakpoints": {
+                "type": "array",
+                "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                "description": "用量阶梯: [[10, 9.9], [50, 6.9]] = 1-10次 $9.9/次, 11-50次 $6.9/次"
+              },
+              "commission_rate": { "type": "number", "minimum": 0, "maximum": 0.5, "default": 0.15 }
+            }
+          }
+        },
+        "default_tier": { "type": "integer", "minimum": 0, "description": "默认推荐档位索引(排序分用此档)" }
+      }
+    },
+    "terms": {
+      "type": "object",
+      "required": ["license", "refund", "commission_rate"],
+      "properties": {
+        "license": {
+          "type": "object",
+          "description": "许可 v2: 细化绑定与升级权益(防盗版, 见 gap_audit G2)",
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["private", "single_org", "open_source", "custom"] },
+            "bindings": { "type": "array", "items": { "enum": ["buyer_pubkey", "org_domain", "seat_count"] }, "description": "绑定方式: 买家公钥激活/组织域名/席位限制" },
+            "watermark": { "type": "boolean", "description": "包内注入买家公钥 hash, 泄露可溯源" },
+            "upgrade": { "enum": ["none", "patch_minor_free", "all_updates"], "description": "授权买家更新权益(与 price.tiers.updates 对应)" }
+          }
+        },
+        "refund": { "type": "string", "description": "退款条件（对拍验证不通过可退; 订阅随时退订停止扣费）" },
+        "commission_rate": { "type": "number", "default": 0.15, "description": "平台抽佣(放款时自动拆账)" },
+        "sla": { "type": "object", "description": "售后 30 天 SLA（违约扣声誉分）", "properties": { "support_days": { "type": "integer", "default": 30 }, "response_hours": { "type": "integer", "default": 48 } } }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "description": "P2P 传输方式（平台不过手文件）",
+      "properties": {
+        "channel": { "enum": ["nostr_attachment", "direct_torrent", "webrtc", "relay_uri", "http_signed"] },
+        "relays": { "type": "array", "items": { "type": "string" } },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "created_at": { "type": "integer", "description": "unix 秒" }
+  }
+}
